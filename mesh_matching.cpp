@@ -4,6 +4,8 @@
 #include <pcl/io/obj_io.h>
 #include <pcl/point_types.h>
 #include <pcl/keypoints/iss_3d.h>
+#include <pcl/keypoints/harris_3d.h>
+#include <pcl/keypoints/sift_keypoint.h>
 #include <pcl/features/normal_3d_omp.h>
 #include <pcl/features/fpfh_omp.h>
 #include <pcl/features/shot_omp.h>
@@ -21,6 +23,7 @@ using FPFHCloudT = pcl::PointCloud<FPFHDescriptorT>;
 using SHOTDescriptorT = pcl::SHOT352;
 using SHOTCloudT = pcl::PointCloud<SHOTDescriptorT>;
 
+
 /**
  * @brief Computes surface normals for a given point cloud.
  * Normals describe the orientation of the surface at each point and are
@@ -31,7 +34,7 @@ using SHOTCloudT = pcl::PointCloud<SHOTDescriptorT>;
 NormalCloudT::Ptr compute_normals(const PointCloudT::Ptr& cloud) {
     NormalCloudT::Ptr normals(new NormalCloudT);
     pcl::NormalEstimationOMP<PointT, NormalT> norm_est;
-    norm_est.setKSearch(10); // Use 10 nearest neighbors to estimate the normal
+    norm_est.setKSearch(100); // Use 100 nearest neighbors to estimate the normal
     norm_est.setInputCloud(cloud);
     norm_est.compute(*normals);
     return normals;
@@ -44,18 +47,61 @@ NormalCloudT::Ptr compute_normals(const PointCloudT::Ptr& cloud) {
  * @param cloud The input point cloud.
  * @return A point cloud containing the detected keypoints.
  */
-PointCloudT::Ptr detect_keypoints(const PointCloudT::Ptr& cloud) {
+PointCloudT::Ptr detect_iss_keypoints(const PointCloudT::Ptr& cloud) {
     PointCloudT::Ptr keypoints(new PointCloudT);
     pcl::ISSKeypoint3D<PointT, PointT> iss_detector;
-    iss_detector.setSalientRadius(1);
+    iss_detector.setSalientRadius(0.08);
     iss_detector.setNonMaxRadius(0.04);
-    iss_detector.setMinNeighbors(5);
+    iss_detector.setMinNeighbors(10);
     iss_detector.setThreshold21(0.975);
     iss_detector.setThreshold32(0.975);
     iss_detector.setInputCloud(cloud);
     iss_detector.compute(*keypoints);
     return keypoints;
 }
+
+/**
+ * @brief Detects keypoints using Harris3D. This detector needs normals.
+ * Harris3D is good for finding corners.
+ */
+PointCloudT::Ptr detect_harris_keypoints(const PointCloudT::Ptr& cloud, const NormalCloudT::Ptr& normals) {
+    // Harris detector outputs PointXYZI, so we need to create a cloud for that
+    pcl::PointCloud<pcl::PointXYZI>::Ptr keypoints_with_intensity(new pcl::PointCloud<pcl::PointXYZI>);
+    pcl::HarrisKeypoint3D<PointT, pcl::PointXYZI> harris_detector;
+    harris_detector.setNonMaxSupression(true);
+    harris_detector.setRadius(0.04);
+    harris_detector.setMethod(pcl::HarrisKeypoint3D<PointT, pcl::PointXYZI>::HARRIS);
+    harris_detector.setInputCloud(cloud);
+    harris_detector.setNormals(normals);
+    harris_detector.compute(*keypoints_with_intensity);
+
+    // Convert the PointXYZI cloud back to our standard PointXYZ cloud
+    PointCloudT::Ptr keypoints(new PointCloudT);
+    pcl::copyPointCloud(*keypoints_with_intensity, *keypoints);
+    return keypoints;
+}
+
+// /**
+//  * @brief Detects keypoints using SIFT3D. This detector needs normals.
+//  * SIFT is good for finding scale-invariant features.
+//  */
+// PointCloudT::Ptr detect_sift_keypoints(const PointCloudT::Ptr& cloud, const NormalCloudT::Ptr& normals) {
+//     // SIFT outputs PointWithScale, so we need a cloud for that
+//     pcl::PointCloud<pcl::PointWithScale> keypoints_with_scale;
+//     pcl::SIFTKeypoint<PointT, pcl::PointWithScale> sift_detector;
+//     sift_detector.setInputCloud(cloud);
+//     // These parameters are crucial and may need tuning for your specific data
+//     sift_detector.setMinScale(0.01);
+//     sift_detector.setNumberOfOctaves(4);
+//     sift_detector.setNumberOfScalesPerOctave(5);
+//     sift_detector.setMinimumContrast(0.005);
+//     sift_detector.compute(keypoints_with_scale);
+
+//     // Convert the PointWithScale cloud back to our standard PointXYZ cloud
+//     PointCloudT::Ptr keypoints(new PointCloudT);
+//     pcl::copyPointCloud(keypoints_with_scale, *keypoints);
+//     return keypoints;
+// }
 
 /**
  * @brief Computes FPFH (Fast Point Feature Histogram) descriptors for keypoints.
@@ -87,7 +133,7 @@ FPFHCloudT::Ptr compute_fpfh_descriptors(const PointCloudT::Ptr& cloud, const Po
 SHOTCloudT::Ptr compute_shot_descriptors(const PointCloudT::Ptr& cloud, const PointCloudT::Ptr& keypoints, const NormalCloudT::Ptr& normals) {
     SHOTCloudT::Ptr descriptors(new SHOTCloudT);
     pcl::SHOTEstimationOMP<PointT, NormalT, SHOTDescriptorT> shot_est;
-    shot_est.setRadiusSearch(.08); // Use a search radius of 8cm
+    shot_est.setRadiusSearch(0.08); // Use a search radius of 8cm
     shot_est.setInputCloud(keypoints);
     shot_est.setInputNormals(normals);
     shot_est.setSearchSurface(cloud);
@@ -97,14 +143,15 @@ SHOTCloudT::Ptr compute_shot_descriptors(const PointCloudT::Ptr& cloud, const Po
 
 
 int main(int argc, char** argv) {
-    if (argc != 4) {
-        std::cerr << "Usage: " << argv[0] << " mesh1.ply mesh2.ply <FPFH|SHOT>" << std::endl;
+    if (argc != 5) {
+        std::cerr << "Usage: " << argv[0] << " mesh1.ply mesh2.ply <FPFH|SHOT> <ISS|HARRIS|SIFT>\n" << std::endl;
         return -1;
     }
 
     std::string mesh1_path = argv[1];
     std::string mesh2_path = argv[2];
     std::string descriptor_type = argv[3];
+    std::string keypoint_type = argv[4];
 
     // --- 1. Load Files ---
     std::cout << "Loading meshes..." << std::endl;
@@ -128,15 +175,47 @@ int main(int argc, char** argv) {
         return -1;
     }
 
+    // --- ADD THIS DIAGNOSTIC BLOCK ---
+    PointT min_pt1, max_pt1;
+    pcl::getMinMax3D(*cloud1, min_pt1, max_pt1);
+    std::cout << "--> Mesh 1 dimensions (WxHxD): "
+              << max_pt1.x - min_pt1.x << " x "
+              << max_pt1.y - min_pt1.y << " x "
+              << max_pt1.z - min_pt1.z << std::endl;
+
+    PointT min_pt2, max_pt2;
+    pcl::getMinMax3D(*cloud2, min_pt2, max_pt2);
+    std::cout << "--> Mesh 2 dimensions (WxHxD): "
+              << max_pt2.x - min_pt2.x << " x "
+              << max_pt2.y - min_pt2.y << " x "
+              << max_pt2.z - min_pt2.z << std::endl;
+    // --- END OF DIAGNOSTIC BLOCK ---
+
+    
     // --- 2. Compute Normals ---
     std::cout << "Computing normals..." << std::endl;
     NormalCloudT::Ptr normals1 = compute_normals(cloud1);
     NormalCloudT::Ptr normals2 = compute_normals(cloud2);
 
     // --- 3. Detect Keypoints ---
-    std::cout << "Detecting keypoints..." << std::endl;
-    PointCloudT::Ptr keypoints1 = detect_keypoints(cloud1);
-    PointCloudT::Ptr keypoints2 = detect_keypoints(cloud2);
+    std::cout << "Detecting keypoints using " << keypoint_type << "..." << std::endl;
+    PointCloudT::Ptr keypoints1(new PointCloudT);
+    PointCloudT::Ptr keypoints2(new PointCloudT);
+
+    // MODIFIED: Select keypoint detector based on argument
+    if (keypoint_type == "ISS") {
+        keypoints1 = detect_iss_keypoints(cloud1);
+        keypoints2 = detect_iss_keypoints(cloud2);
+    } else if (keypoint_type == "HARRIS") {
+        keypoints1 = detect_harris_keypoints(cloud1, normals1);
+        keypoints2 = detect_harris_keypoints(cloud2, normals2);
+    // } else if (keypoint_type == "SIFT") {
+    //     keypoints1 = detect_sift_keypoints(cloud1, normals1);
+    //     keypoints2 = detect_sift_keypoints(cloud2, normals2);
+    } else {
+        std::cerr << "Unknown keypoint type: " << keypoint_type << ". Use ISS, HARRIS, or SIFT." << std::endl;
+        return -1;
+    }
     std::cout << "Found " << keypoints1->size() << " keypoints in mesh 1." << std::endl;
     std::cout << "Found " << keypoints2->size() << " keypoints in mesh 2." << std::endl;
 
