@@ -1,0 +1,17 @@
+# Keypoint Detector Parameters
+keypoint_detectors:
+  ISS:
+    salient_radius: 0.08
+    non_max_radius: 0.04
+    min_neighbors: 10
+    threshold21: 0.975
+    threshold32: 0.975
+  HARRIS:
+    radius: 0.04
+
+# Descriptor Parameters
+descriptors:
+  FPFH:
+    radius_search: 0.08
+  SHOT:
+    radius_search: 0.08
